@@ -6,68 +6,98 @@ const {
   DisconnectReason
 } = require('@whiskeysockets/baileys')
 
-const P = require('pino')
 const qrcode = require('qrcode-terminal')
+const P = require('pino')
 const fs = require('fs')
 
 /**
- * ✅ SIMPLE LOGGER (console + file)
+ * ✅ PUT YOUR NUMBER HERE
  */
+const MY_JID = 'YOUR_NUMBER@s.whatsapp.net'
+
 function log(text) {
   const line = `[${new Date().toISOString()}] ${text}`
   console.log(line)
   fs.appendFileSync('bot.log', line + '\n')
 }
 
-/**
- * ✅ Convert stream → buffer
- */
 async function streamToBuffer(stream) {
   const chunks = []
-  for await (const chunk of stream) {
-    chunks.push(chunk)
-  }
+  for await (const chunk of stream) chunks.push(chunk)
   return Buffer.concat(chunks)
 }
 
-/**
- * ✅ Detect "view once"
- */
+function getQuotedMessage(msg) {
+  return msg?.extendedTextMessage?.contextInfo?.quotedMessage
+}
+
 function isViewOnce(msg) {
-  return !!(
-    msg?.viewOnceMessage ||
-    msg?.viewOnceMessageV2 ||
-    msg?.viewOnceMessageV2Extension
-  )
+  if (!msg) return false
+  return JSON.stringify(msg).includes('viewOnce')
 }
 
 /**
- * ✅ Extract inner media
+ * ✅ FULL UNWRAP (WORKING FIX)
  */
-function extractMedia(msg) {
-  if (msg.viewOnceMessage) return msg.viewOnceMessage.message
-  if (msg.viewOnceMessageV2) return msg.viewOnceMessageV2.message
-  if (msg.viewOnceMessageV2Extension) return msg.viewOnceMessageV2Extension.message
+function deepUnwrap(msg) {
+  let m = msg
+
+  while (true) {
+    if (m?.viewOnceMessage?.message) {
+      m = m.viewOnceMessage.message
+      continue
+    }
+
+    if (m?.viewOnceMessageV2?.message) {
+      m = m.viewOnceMessageV2.message
+      continue
+    }
+
+    if (m?.viewOnceMessageV2Extension?.message) {
+      m = m.viewOnceMessageV2Extension.message
+      continue
+    }
+
+    if (m?.ephemeralMessage?.message) {
+      m = m.ephemeralMessage.message
+      continue
+    }
+
+    if (m?.message) {
+      m = m.message
+      continue
+    }
+
+    break
+  }
+
+  return m
+}
+
+function getMedia(msg) {
+  if (!msg) return null
+
+  for (const key of Object.keys(msg)) {
+    if (key.endsWith('Message')) {
+      const media = msg[key]
+      if (media?.url || media?.directPath) {
+        return { key, media }
+      }
+    }
+  }
+
   return null
 }
 
-/**
- * ✅ Download media
- */
-async function downloadMedia(mediaMsg) {
-  const type = Object.keys(mediaMsg)[0] // imageMessage, videoMessage...
-  const stream = await downloadContentFromMessage(
-    mediaMsg[type],
-    type.replace('Message', '')
-  )
+async function download(mediaObj) {
+  const { key, media } = mediaObj
+  const type = key.replace('Message', '')
+  const stream = await downloadContentFromMessage(media, type)
   return await streamToBuffer(stream)
 }
 
-/**
- * ✅ Main bot
- */
 async function startBot() {
-  log('🚀 Starting bot...')
+  log('🚀 Starting')
 
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
   const { version } = await fetchLatestBaileysVersion()
@@ -78,35 +108,24 @@ async function startBot() {
     logger: P({ level: 'silent' })
   })
 
-  /**
-   * ✅ CONNECTION EVENTS
-   */
   sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
     if (qr) {
-      log('📱 Scan QR code below')
+      log('📱 Scan QR')
       qrcode.generate(qr, { small: true })
     }
 
-    if (connection === 'open') {
-      log('✅ Connected to WhatsApp')
-    }
+    if (connection === 'open') log('✅ Connected')
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode
-      log(`❌ Connection closed (code: ${code})`)
+      log('❌ Closed: ' + code)
 
       if (code !== DisconnectReason.loggedOut) {
-        log('🔁 Reconnecting...')
         startBot()
-      } else {
-        log('🚪 Logged out, delete /auth and restart')
       }
     }
   })
 
-  /**
-   * ✅ SAVE SESSION
-   */
   sock.ev.on('creds.update', saveCreds)
 
   /**
@@ -117,75 +136,62 @@ async function startBot() {
 
     for (const msg of messages) {
       try {
-        const message = msg.message
-        if (!message) continue
+        if (!msg.message) continue
 
         const from = msg.key.remoteJid
-        log(`📩 Message from ${from}`)
+        log('📩 Message from ' + from)
 
-        // ✅ quoted message (reply)
-        const quoted =
-          message?.extendedTextMessage?.contextInfo?.quotedMessage
+        const quoted = getQuotedMessage(msg.message)
 
-        if (!quoted) {
-          log('➡️ No quoted message, skipping')
-          continue
-        }
+        if (!quoted) continue
 
         if (!isViewOnce(quoted)) {
-          log('➡️ Not a view-once message')
+          log('➡️ Not view-once')
           continue
         }
 
-        log('📸 View-once detected!')
+        log('📸 VIEW ONCE DETECTED ✅')
 
-        const mediaMsg = extractMedia(quoted)
-        if (!mediaMsg) {
-          log('⚠️ Failed to extract media')
+        const inner = deepUnwrap(quoted)
+
+        const mediaObj = getMedia(inner)
+
+        if (!mediaObj) {
+          log('❌ Media not found')
           continue
         }
 
-        const buffer = await downloadMedia(mediaMsg)
+        const buffer = await download(mediaObj)
 
-        log(`✅ Media downloaded (${buffer.length} bytes)`)
+        log('✅ Downloaded (' + buffer.length + ' bytes)')
 
         /**
-         * ✅ SEND BACK MEDIA
+         * ✅ SEND ONLY TO YOU
          */
-        if (mediaMsg.imageMessage) {
-          await sock.sendMessage(from, {
+        if (mediaObj.key === 'imageMessage') {
+          await sock.sendMessage(MY_JID, {
             image: buffer,
-            caption: 'Recovered view-once ✅'
+            caption: 'Recovered ✅'
           })
-          log('📤 Image sent')
-        } else if (mediaMsg.videoMessage) {
-          await sock.sendMessage(from, {
+        } else if (mediaObj.key === 'videoMessage') {
+          await sock.sendMessage(MY_JID, {
             video: buffer,
-            caption: 'Recovered view-once ✅'
+            caption: 'Recovered ✅'
           })
-          log('📤 Video sent')
-        } else if (mediaMsg.audioMessage) {
-          await sock.sendMessage(from, {
-            audio: buffer,
-            mimetype: 'audio/ogg'
-          })
-          log('📤 Audio sent')
         } else {
-          await sock.sendMessage(from, {
+          await sock.sendMessage(MY_JID, {
             document: buffer,
-            fileName: 'file.bin'
+            fileName: 'recovered.bin'
           })
-          log('📤 File sent')
         }
 
+        log('📤 Sent to self ✅')
+
       } catch (err) {
-        log(`❌ ERROR: ${err.message}`)
+        log('❌ ' + err.message)
       }
     }
   })
 }
 
-/**
- * ✅ START
- */
 startBot()
