@@ -43,16 +43,23 @@ const logger = pino({ level: process.env.LOG_LEVEL || "silent" });
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Detect if a raw message object is a view-once wrapper.
- * Checks all known wrapper key names WhatsApp has used.
+ * Detect if a message content object is a view-once wrapper.
+ * Recurses into ephemeral/associatedChild envelopes (linked device quirk).
  */
 function isViewOnce(msgContent) {
     if (!msgContent) return false;
-    return !!(
+    // Direct wrapper
+    if (
         msgContent.viewOnceMessage ||
         msgContent.viewOnceMessageV2 ||
         msgContent.viewOnceMessageV2Extension
-    );
+    ) return true;
+    // Linked devices sometimes add an extra ephemeral/associatedChild envelope
+    const inner =
+        msgContent.ephemeralMessage?.message ||
+        msgContent.associatedChildMessage?.message;
+    if (inner) return isViewOnce(inner);
+    return false;
 }
 
 /**
@@ -96,10 +103,6 @@ function saveToDisk(buffer, ext) {
 
 // ─── Core: auto-download view-once ───────────────────────────────────────────
 
-/**
- * Called automatically whenever a view-once message arrives.
- * Downloads the media and re-sends it in the same chat.
- */
 async function processViewOnce(sock, msg) {
     const jid   = msg.key.remoteJid;
     const inner = unwrapInner(msg.message);
@@ -126,7 +129,6 @@ async function processViewOnce(sock, msg) {
         const ext     = type === "video" ? "mp4" : type === "audio" ? "m4a" : "jpg";
         const caption = `👁 View-once ${type} — saved automatically`;
 
-        // Re-send the media back into the same chat
         if (type === "image") {
             await sock.sendMessage(jid, { image: buffer, caption });
         } else if (type === "video") {
@@ -135,7 +137,6 @@ async function processViewOnce(sock, msg) {
             await sock.sendMessage(jid, { audio: buffer, mimetype: "audio/mp4" });
         }
 
-        // Save to disk as well
         const saved = saveToDisk(buffer, ext);
         console.log(`[view-once] Saved to disk → ${saved}`);
 
@@ -175,21 +176,28 @@ async function handleHelp(sock, msg) {
 async function handleMessage(sock, msg) {
     const { remoteJid } = msg.key;
 
-    // Ignore broadcasts, status, and messages sent by the bot itself
+    // Ignore empty messages, broadcasts and status
     if (
         !msg.message ||
-        msg.key.fromMe ||
         isJidBroadcast(remoteJid) ||
         remoteJid === "status@broadcast"
     ) return;
 
-    // ── Auto view-once detection ───────────────────────────────────────────────
+    // Debug: log every message so you can see what arrives in pm2 logs
+    const msgKeys = Object.keys(msg.message);
+    console.log(`[msg] remoteJid=${remoteJid} fromMe=${msg.key.fromMe} keys=${msgKeys.join(",")}`);
+
+    // ── Auto view-once detection ──────────────────────────────────────────────
+    // IMPORTANT: on a linked device, messages received BY you arrive
+    // with fromMe=true — so we must NOT filter on fromMe before this check.
     if (isViewOnce(msg.message)) {
         await processViewOnce(sock, msg);
         return;
     }
 
-    // ── Text commands ─────────────────────────────────────────────────────────
+    // ── Text commands — skip own messages to avoid reply loops ────────────────
+    if (msg.key.fromMe) return;
+
     const body =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -218,13 +226,12 @@ async function startBot() {
             creds: state.creds,
             keys:  makeCacheableSignalKeyStore(state.keys, logger),
         },
-        syncFullHistory:              false,
-        markOnlineOnConnect:          true,
+        syncFullHistory:                false,
+        markOnlineOnConnect:            true,
         generateHighQualityLinkPreview: false,
-        retryRequestDelayMs:          2000,
+        retryRequestDelayMs:            2000,
     });
 
-    // ── QR + connection state ─────────────────────────────────────────────────
     sock.ev.on("connection.update", (update) => {
         const { connection, lastDisconnect, qr } = update;
 
@@ -252,7 +259,6 @@ async function startBot() {
 
     sock.ev.on("creds.update", saveCreds);
 
-    // ── Incoming messages ─────────────────────────────────────────────────────
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
         for (const msg of messages) {
