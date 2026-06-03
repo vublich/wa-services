@@ -47,6 +47,7 @@ pm2 list --> gives something similar
 ├────┼────────────────────┼──────────┼──────┼───────────┼──────────┼──────────┤
 │ 0  │ wa-bot             │ fork     │ 0    │ online    │ 0%       │ 123.1mb  │
 └────┴────────────────────┴──────────┴──────┴───────────┴──────────┴──────────┘
+
 pm2 logs wa-bot to check what the bot is doing when a message arrive.
 
 [2026-06-03T14:07:55.399Z] 🚀 Starting
