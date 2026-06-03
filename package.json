@@ -1,0 +1,17 @@
+{
+  "name": "wa-viewonce-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp bot with view-once downloader",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "LOG_LEVEL=debug node index.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
