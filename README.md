@@ -29,7 +29,7 @@ Built with **Baileys** (`@whiskeysockets/baileys`).
 Clone the repository and install dependencies:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/vublich/wa-bot.git
 cd wa-bot
 
 npm install
